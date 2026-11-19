@@ -1,0 +1,74 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Admin = a user whose uid has a doc in /admins. That doc can ONLY be
+    // created from the Firebase console / Admin SDK (clients can never write it).
+    function isAdmin() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    match /admins/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // Public, sanitized campaign data. NO sponsor identity here.
+    match /campaigns/{cid} {
+      allow read: if true;
+      allow create, update: if isAdmin()
+        && request.resource.data.soldPackets is int
+        && request.resource.data.soldPackets >= 0
+        && request.resource.data.soldPackets <= request.resource.data.targetPackets
+        && request.resource.data.targetPackets is int
+        && request.resource.data.targetPackets > 0
+        && request.resource.data.targetPackets <= 10000;
+      allow delete: if false; // archive instead
+
+      // Sponsor identity / prize / location. Readable by the public ONLY after
+      // revealAt, judged by SERVER time (request.time), not the client clock.
+      match /reveal/{doc} {
+        allow read: if isAdmin()
+          || (get(/databases/$(database)/documents/campaigns/$(cid)).data.revealAt != null
+              && get(/databases/$(database)/documents/campaigns/$(cid)).data.revealAt <= request.time
+              && get(/databases/$(database)/documents/campaigns/$(cid)).data.status in ['selling','claims_open','claimed','closed']);
+        allow write: if isAdmin();
+      }
+    }
+
+    // Winners: public only when published (consent is enforced here and in the UI).
+    match /winners/{id} {
+      allow read: if resource.data.published == true || isAdmin();
+      allow create, update: if isAdmin()
+        && (request.resource.data.published != true
+            || request.resource.data.consentName == true)
+        && (request.resource.data.get('photoUrl', '') == ''
+            || request.resource.data.consentPhoto == true);
+      allow delete: if false; // soft-delete via `deleted: true`
+    }
+
+    match /vendor/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /settings/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Append-only audit log.
+    match /audit/{id} {
+      allow read: if isAdmin();
+      allow create: if isAdmin()
+        && request.resource.data.actorId == request.auth.uid
+        && request.resource.data.timestamp == request.time;
+      allow update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
